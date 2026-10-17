@@ -154,20 +154,22 @@ static pid_t find_pid_by_pkg(const std::string& pkg) {
 
 // ======================== หา il2cpp base ========================
 static uintptr_t find_il2cpp_base(pid_t pid, std::ostringstream& dbg) {
-    char maps_path[64];
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-    FILE* fp = fopen(maps_path, "r");
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "su -c 'cat /proc/%d/maps' 2>/dev/null", pid);
+    FILE* fp = popen(cmd, "r");
     if (!fp) {
-        dbg << "❌ Cannot open " << maps_path << "\n";
+        dbg << "❌ popen failed for /proc/" << pid << "/maps
+";
         return 0;
     }
 
-    char line[512];
+    char line[1024];
     uintptr_t base = 0;
     uintptr_t lowest_start = UINTPTR_MAX;
     int found_count = 0;
 
-    dbg << "=== il2cpp segments (first 5) ===\n";
+    dbg << "=== il2cpp segments (first 5) ===
+";
 
     while (fgets(line, sizeof(line), fp)) {
         if (!strstr(line, "libil2cpp.so")) continue;
@@ -178,11 +180,11 @@ static uintptr_t find_il2cpp_base(pid_t pid, std::ostringstream& dbg) {
 
         if (found_count < 5) {
             dbg << "  " << std::hex << start << "-" << end
-                << " " << perms << " off=0x" << offset << std::dec << "\n";
+                << " " << perms << " off=0x" << offset << std::dec << "
+";
             found_count++;
         }
 
-        // เลือก segment ที่ offset == 0 และ start ต่ำสุด (base ของ ELF)
         if (offset == 0 && strchr(perms, 'r')) {
             if (start < lowest_start) {
                 lowest_start = start;
@@ -190,7 +192,12 @@ static uintptr_t find_il2cpp_base(pid_t pid, std::ostringstream& dbg) {
             }
         }
     }
-    fclose(fp);
+    pclose(fp);
+
+    if (found_count == 0) {
+        dbg << "  (no il2cpp lines found)
+";
+    }
     return base;
 }
 
