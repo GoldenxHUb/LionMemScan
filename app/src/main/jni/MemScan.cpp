@@ -68,7 +68,7 @@ Java_com_lion_memscan_MainActivity_scanMemory(
         scanned++;
 
         uintptr_t addr = mem.memScanner.findBytesFirst(
-            map.start, map.end, patStr.c_str(), mask.c_str());
+            map.startAddress, map.endAddress, patStr.c_str(), mask.c_str());
 
         if (addr != 0) {
             char buf[256];
