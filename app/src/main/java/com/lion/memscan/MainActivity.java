@@ -309,7 +309,7 @@ public class MainActivity extends Activity {
                 appLabels.add("Free Fire MAX  ·  com.dts.freefiremax");
             }
 
-            ArrayAdapter<String> adapter = new ArrayAdapter<>(
+            ArrayAdapter<String> adapter = new ArrayAdapter<String>(
                     this, android.R.layout.simple_spinner_item, appLabels) {
                 @Override
                 public View getView(int position, View convertView, ViewGroup parent) {
