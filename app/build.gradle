@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.lion.memscan'
+    compileSdk 34
+    ndkVersion "25.2.9519653"
+
+    defaultConfig {
+        applicationId "com.lion.memscan"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path file('src/main/jni/Android.mk')
+        }
+    }
+}
