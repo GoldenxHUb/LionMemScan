@@ -2,127 +2,273 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <sstream>
+#include <vector>
 #include <android/log.h>
 
 // KittyMemoryEx
 #include "KittyMemoryEx.hpp"
 #include "KittyMemoryMgr.hpp"
-#include "KittyScanner.hpp"
 
 #define LOG_TAG "LionMemScan"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// หา PID ด้วย popen("su -c pidof ...")
-static pid_t find_pid_by_name(const char* pkg) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "su -c pidof %s", pkg);
-    LOGI("Running: %s", cmd);
-
-    FILE* fp = popen(cmd, "r");
-    if (!fp) {
-        LOGE("popen failed");
-        return -1;
-    }
-    char buf[64] = {0};
-    if (!fgets(buf, sizeof(buf), fp)) {
-        LOGE("pidof empty");
-        pclose(fp);
-        return -1;
-    }
-    pclose(fp);
-    LOGI("pidof output: %s", buf);
-    return atoi(buf);
+// ======================== OFFSETS จาก OFFSET FINDER ========================
+namespace OFF {
+    constexpr uintptr_t InitBase       = 0xA342EFC;
+    constexpr uintptr_t Weapon         = 0x64;
+    constexpr uintptr_t WeaponData     = 0x3358;
+    constexpr uintptr_t NoReload       = 0xC1;
+    constexpr uintptr_t FollowCamera   = 0x1A30;
+    constexpr uintptr_t AimRotation    = 0x440;
+    constexpr uintptr_t CurrentObserver = 0xB4;
+    constexpr uintptr_t ObserverPlayer = 0x58;
+    constexpr uintptr_t CurrentMatch   = 0x34;
+    constexpr uintptr_t MatchStatus    = 0xC;
+    constexpr uintptr_t LocalPlayer    = 0x230;
+    constexpr uintptr_t Camera         = 0x18;
+    constexpr uintptr_t Player_Data    = 0x48;
+    constexpr uintptr_t Avatar         = 0xA8;
+    constexpr uintptr_t AvatarManager  = 0x60;
+    constexpr uintptr_t Player_ShadowBase = 0x1A60;
+    constexpr uintptr_t UnlimitedAmmo  = 0x114;
+    constexpr uintptr_t Avatar_Data    = 0xC;
+    constexpr uintptr_t Avatar_Data_IsTeam = 0x59;
+    constexpr uintptr_t Avatar_IsVisible = 0x50;
+    constexpr uintptr_t IsFiring       = 0x58C;
+    constexpr uintptr_t Player_IsDead  = 0x54;
+    constexpr uintptr_t Player_Name    = 0xA4;
+    constexpr uintptr_t AimVisible     = 0x4E8;
+    constexpr uintptr_t MainCameraTransform = 0x28C;
+    constexpr uintptr_t DictionaryEntities = 0x68;
+    constexpr uintptr_t ViewMatrix     = 0xE8;
+    constexpr uintptr_t GameTimer      = 0x10;
+    constexpr uintptr_t FixedDeltaTime = 0x24;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_lion_memscan_MainActivity_scanMemory(
-    JNIEnv* env, jobject /*this*/,
-    jstring packageName, jstring pattern) {
+// ======================== Helper: อ่าน Memory ========================
+static uintptr_t rdPtr(KittyMemoryMgr& mem, pid_t pid, uintptr_t addr) {
+    uintptr_t v = 0;
+    if (!mem.readMem(addr, &v, sizeof(v))) return 0;
+    return v;
+}
 
-    const char* pkg = env->GetStringUTFChars(packageName, nullptr);
-    const char* pat = env->GetStringUTFChars(pattern, nullptr);
-    if (!pkg || !pat) {
-        return env->NewStringUTF("❌ null input");
+static int rdInt(KittyMemoryMgr& mem, pid_t pid, uintptr_t addr) {
+    int v = 0;
+    mem.readMem(addr, &v, sizeof(v));
+    return v;
+}
+
+static float rdFloat(KittyMemoryMgr& mem, pid_t pid, uintptr_t addr) {
+    float v = 0;
+    mem.readMem(addr, &v, sizeof(v));
+    return v;
+}
+
+static bool rdBool(KittyMemoryMgr& mem, pid_t pid, uintptr_t addr) {
+    uint8_t v = 0;
+    mem.readMem(addr, &v, sizeof(v));
+    return v != 0;
+}
+
+// อ่าน String จาก Unity (Il2CppString)
+static std::string rdUString(KittyMemoryMgr& mem, pid_t pid, uintptr_t addr) {
+    if (addr == 0) return "";
+
+    // Unity String: [class 8][monitor 8][length 4][utf16 chars]
+    int32_t length = rdInt(mem, pid, addr + 0x10);
+    if (length <= 0 || length > 64) return "";
+
+    std::vector<uint16_t> buf(length);
+    if (!mem.readMem(addr + 0x14, buf.data(), length * 2)) return "";
+
+    std::string out;
+    for (int i = 0; i < length; i++) {
+        out.push_back((char)(buf[i] & 0xFF));
     }
+    return out;
+}
 
-    std::string pkgStr = pkg;
-    std::string patStr = pat;
-    env->ReleaseStringUTFChars(packageName, pkg);
-    env->ReleaseStringUTFChars(pattern, pat);
+// ======================== หา il2cpp base ========================
+static uintptr_t find_il2cpp_base(pid_t pid) {
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE* fp = fopen(maps_path, "r");
+    if (!fp) return 0;
 
-    LOGI("=== Scan request ===");
-    LOGI("Package: %s", pkgStr.c_str());
-    LOGI("Pattern: %s", patStr.c_str());
-
-    std::ostringstream oss;
-    oss << "Package: " << pkgStr << "\n";
-    oss << "Pattern: \"" << patStr << "\"\n";
-    oss << "────────────────────\n";
-
-    // 1. หา PID ด้วย su -c pidof
-    pid_t pid = find_pid_by_name(pkgStr.c_str());
-    LOGI("Resolved PID: %d", pid);
-
-    if (pid <= 0) {
-        oss << "❌ ไม่พบ process\n\n";
-        oss << "ตรวจสอบ:\n";
-        oss << "- เกมเปิดอยู่หรือไม่?\n";
-        oss << "- KernelSU grant root ให้แอปหรือยัง?\n";
-        oss << "- su ทำงานใน Termux ไหม?\n";
-        return env->NewStringUTF(oss.str().c_str());
-    }
-    oss << "✅ PID: " << pid << "\n\n";
-
-    // 2. สร้าง Manager
-    KittyMemoryMgr mem;
-    if (!mem.initialize(pid, EK_MEM_OP_SYSCALL, false)) {
-        LOGE("initialize failed");
-        oss << "❌ KittyMemoryMgr init failed\n";
-        oss << "(SELinux? setenforce 0)\n";
-        return env->NewStringUTF(oss.str().c_str());
-    }
-    oss << "✅ Manager initialized\n\n";
-
-    // 3. ดึง Maps
-    auto maps = KittyMemoryEx::getAllMaps(pid);
-    oss << "📋 Memory maps: " << maps.size() << "\n\n";
-
-    // 4. สแกน
-    int found_count = 0;
-    int scanned = 0;
-    std::string mask(patStr.length(), 'x');
-
-    for (auto& map : maps) {
-        if (!map.readable) continue;
-        if (map.length > 100 * 1024 * 1024) continue;
-
-        scanned++;
-
-        uintptr_t addr = mem.memScanner.findBytesFirst(
-            map.startAddress, map.endAddress,
-            patStr.c_str(), mask.c_str());
-
-        if (addr != 0) {
-            char buf[256];
-            std::string path = map.pathname.empty() ? "?" : map.pathname;
-            snprintf(buf, sizeof(buf), "  [%d] 0x%lx\n       %s\n",
-                     ++found_count, (unsigned long)addr, path.c_str());
-            oss << buf;
-            LOGI("Found at 0x%lx in %s", (unsigned long)addr, path.c_str());
-
-            if (found_count >= 30) {
-                oss << "  ... (จำกัด 30 ตำแหน่ง)\n";
+    char line[512];
+    uintptr_t base = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "libil2cpp.so") && strstr(line, "r--p")) {
+            uintptr_t start;
+            if (sscanf(line, "%lx-", &start) == 1) {
+                base = start;
                 break;
             }
         }
     }
+    fclose(fp);
+    return base;
+}
 
-    oss << "\n════════════════════\n";
-    oss << "Scanned: " << scanned << " regions\n";
-    oss << "Found:   " << found_count << " matches\n";
+// ======================== MAIN SPY ========================
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_lion_memscan_MainActivity_scanMemory(
+    JNIEnv* env, jobject, jstring packageName, jstring pattern) {
+
+    const char* pkg = env->GetStringUTFChars(packageName, nullptr);
+    std::string pkgStr = pkg;
+    env->ReleaseStringUTFChars(packageName, pkg);
+
+    std::ostringstream oss;
+
+    // 1. หา PID
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "su -c pidof %s", pkgStr.c_str());
+    FILE* fp = popen(cmd, "r");
+    if (!fp) return env->NewStringUTF("❌ popen failed");
+    char pidBuf[32] = {0};
+    fgets(pidBuf, sizeof(pidBuf), fp);
+    pclose(fp);
+
+    pid_t pid = atoi(pidBuf);
+    if (pid <= 0) return env->NewStringUTF("❌ ไม่พบ process");
+
+    oss << "🎮 " << pkgStr << "\n";
+    oss << "PID: " << pid << "\n";
+    oss << "═══════════════════════\n\n";
+
+    // 2. สร้าง Manager
+    KittyMemoryMgr mem;
+    if (!mem.initialize(pid, EK_MEM_OP_SYSCALL, false)) {
+        return env->NewStringUTF("❌ KittyMemoryMgr init failed (SELinux?)");
+    }
+
+    // 3. หา il2cpp base
+    uintptr_t il2cpp = find_il2cpp_base(pid);
+    if (il2cpp == 0) {
+        return env->NewStringUTF("❌ libil2cpp.so not found");
+    }
+    oss << "🔧 il2cpp base: 0x" << std::hex << il2cpp << std::dec << "\n\n";
+
+    // ==========================================================
+    // SPY 1: InitBase (GameFacade)
+    // ==========================================================
+    uintptr_t gameFacade = rdPtr(mem, pid, il2cpp + OFF::InitBase);
+    oss << "📦 GameFacade: 0x" << std::hex << gameFacade << std::dec << "\n";
+    if (gameFacade == 0) {
+        oss << "❌ GameFacade null (เกมโหลดเสร็จหรือยัง?)\n";
+        return env->NewStringUTF(oss.str().c_str());
+    }
+
+    // ==========================================================
+    // SPY 2: Current Match
+    // ==========================================================
+    uintptr_t currentMatch = rdPtr(mem, pid, gameFacade + OFF::CurrentMatch);
+    oss << "🎯 CurrentMatch: 0x" << std::hex << currentMatch << std::dec << "\n";
+
+    if (currentMatch != 0) {
+        int matchStatus = rdInt(mem, pid, currentMatch + OFF::MatchStatus);
+        oss << "   Status: " << matchStatus << "\n";
+    }
+
+    // ==========================================================
+    // SPY 3: Local Player
+    // ==========================================================
+    uintptr_t localPlayer = 0;
+    if (currentMatch != 0) {
+        localPlayer = rdPtr(mem, pid, currentMatch + OFF::LocalPlayer);
+    }
+    oss << "\n👤 LocalPlayer: 0x" << std::hex << localPlayer << std::dec << "\n";
+
+    if (localPlayer != 0) {
+        // Player Name
+        uintptr_t namePtr = rdPtr(mem, pid, localPlayer + OFF::Player_Name);
+        std::string name = rdUString(mem, pid, namePtr);
+        oss << "   Name: \"" << name << "\"\n";
+
+        // HP (สมมติว่าอยู่ใน Player_Data)
+        uintptr_t playerData = rdPtr(mem, pid, localPlayer + OFF::Player_Data);
+        if (playerData != 0) {
+            int hp = rdInt(mem, pid, playerData + OFF::UnlimitedAmmo); // ใช้ offset เดียวกัน
+            oss << "   HP/Ammo: " << hp << "\n";
+        }
+
+        // IsFiring
+        bool firing = rdBool(mem, pid, localPlayer + OFF::IsFiring);
+        oss << "   Firing: " << (firing ? "YES" : "NO") << "\n";
+
+        // IsDead
+        bool dead = rdBool(mem, pid, localPlayer + OFF::Player_IsDead);
+        oss << "   Dead: " << (dead ? "YES" : "NO") << "\n";
+    }
+
+    // ==========================================================
+    // SPY 4: Camera
+    // ==========================================================
+    uintptr_t camera = 0;
+    if (currentMatch != 0) {
+        camera = rdPtr(mem, pid, currentMatch + OFF::Camera);
+    }
+    oss << "\n📷 Camera: 0x" << std::hex << camera << std::dec << "\n";
+
+    if (camera != 0) {
+        uintptr_t camTransform = rdPtr(mem, pid, camera + OFF::MainCameraTransform);
+        oss << "   Transform: 0x" << std::hex << camTransform << std::dec << "\n";
+
+        if (camTransform != 0) {
+            // อ่านตำแหน่ง (Position X,Y,Z)
+            float px = rdFloat(mem, pid, camTransform + 0x44);
+            float py = rdFloat(mem, pid, camTransform + 0x48);
+            float pz = rdFloat(mem, pid, camTransform + 0x4C);
+            oss << "   Pos: (" << px << ", " << py << ", " << pz << ")\n";
+        }
+    }
+
+    // ==========================================================
+    // SPY 5: Player List (Dictionary)
+    // ==========================================================
+    if (currentMatch != 0) {
+        uintptr_t dict = rdPtr(mem, pid, currentMatch + OFF::DictionaryEntities);
+        oss << "\n👥 Player List: 0x" << std::hex << dict << std::dec << "\n";
+
+        if (dict != 0) {
+            // Unity Dictionary structure:
+            // +0x00: klass
+            // +0x10: entries (Il2CppArray)
+            // +0x20: count
+            uintptr_t entries = rdPtr(mem, pid, dict + 0x10);
+            int count = rdInt(mem, pid, dict + 0x20);
+
+            oss << "   Count: " << count << "\n";
+
+            if (entries != 0 && count > 0 && count <= 100) {
+                // แต่ละ entry มีขนาด 0x20 bytes
+                // +0x00: hashCode
+                // +0x08: key
+                // +0x10: value (Player pointer)
+                for (int i = 0; i < count && i < 20; i++) {
+                    uintptr_t entryAddr = entries + 0x20 + (i * 0x20);
+                    uintptr_t playerPtr = rdPtr(mem, pid, entryAddr + 0x10);
+
+                    if (playerPtr == 0) continue;
+
+                    uintptr_t pnamePtr = rdPtr(mem, pid, playerPtr + OFF::Player_Name);
+                    std::string pname = rdUString(mem, pid, pnamePtr);
+                    bool isDead = rdBool(mem, pid, playerPtr + OFF::Player_IsDead);
+
+                    oss << "   [" << i << "] " << pname
+                        << (isDead ? " (DEAD)" : "") << "\n";
+                }
+            }
+        }
+    }
+
+    oss << "\n═══════════════════════\n";
+    oss << "✅ SPY COMPLETE\n";
 
     return env->NewStringUTF(oss.str().c_str());
 }
