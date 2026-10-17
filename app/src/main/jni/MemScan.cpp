@@ -7,9 +7,9 @@
 #include <android/log.h>
 
 // KittyMemoryEx
-#include "KittyMemoryEx/KittyMemoryEx.hpp"
-#include "KittyMemoryEx/KittyMemoryMgr.hpp"
-#include "KittyMemoryEx/KittyScanner.hpp"
+#include "KittyMemoryEx.hpp"
+#include "KittyMemoryMgr.hpp"
+#include "KittyScanner.hpp"
 
 #define LOG_TAG "LionMemScan"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)

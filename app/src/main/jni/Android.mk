@@ -1,7 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 
-# KittyMemoryEx sources
-KITTY_PATH := $(LOCAL_PATH)/KittyMemoryEx
+# KittyMemoryEx source (ซ้อน 2 ชั้น)
+KITTY_PATH := $(LOCAL_PATH)/KittyMemoryEx/KittyMemoryEx
 KITTY_SRC  := $(wildcard $(KITTY_PATH)/*.cpp)
 
 include $(CLEAR_VARS)
