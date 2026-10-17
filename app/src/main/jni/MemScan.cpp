@@ -88,25 +88,68 @@ static std::string rdUString(KittyMemoryMgr& mem, pid_t pid, uintptr_t addr) {
 
 // ======================== หา PID (สแกน /proc) ========================
 static pid_t find_pid_by_pkg(const std::string& pkg) {
-    DIR* dir = opendir("/proc");
-    if (!dir) return -1;
-    struct dirent* e;
-    pid_t found = -1;
-    while ((e = readdir(dir))) {
-        if (e->d_type != DT_DIR) continue;
-        pid_t p = atoi(e->d_name);
-        if (p <= 0) continue;
-        char path[64];
-        snprintf(path, sizeof(path), "/proc/%d/cmdline", p);
-        FILE* f = fopen(path, "r");
-        if (!f) continue;
-        char buf[512] = {0};
-        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-        fclose(f);
-        if (n > 0 && pkg == buf) { found = p; break; }
+    // 1) ลองอ่าน /proc ตรงๆ ก่อน
+    {
+        DIR* dir = opendir("/proc");
+        if (dir) {
+            struct dirent* e;
+            while ((e = readdir(dir))) {
+                if (e->d_type != DT_DIR) continue;
+                pid_t p = atoi(e->d_name);
+                if (p <= 0) continue;
+                char path[64];
+                snprintf(path, sizeof(path), "/proc/%d/cmdline", p);
+                FILE* f = fopen(path, "r");
+                if (!f) continue;
+                char buf[512] = {0};
+                size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+                fclose(f);
+                if (n > 0 && pkg == buf) {
+                    closedir(dir);
+                    return p;
+                }
+            }
+            closedir(dir);
+        }
     }
-    closedir(dir);
-    return found;
+
+    // 2) fallback: เรียก su -c pidof
+    {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "su -c 'pidof %s' 2>/dev/null", pkg.c_str());
+        FILE* fp = popen(cmd, "r");
+        if (fp) {
+            char buf[32] = {0};
+            if (fgets(buf, sizeof(buf), fp)) {
+                pclose(fp);
+                pid_t p = atoi(buf);
+                if (p > 0) return p;
+            } else {
+                pclose(fp);
+            }
+        }
+    }
+
+    // 3) fallback: เรียก ps | grep
+    {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+            "su -c \"ps -A | grep %s | awk '{print $2}'\" 2>/dev/null",
+            pkg.c_str());
+        FILE* fp = popen(cmd, "r");
+        if (fp) {
+            char buf[32] = {0};
+            if (fgets(buf, sizeof(buf), fp)) {
+                pclose(fp);
+                pid_t p = atoi(buf);
+                if (p > 0) return p;
+            } else {
+                pclose(fp);
+            }
+        }
+    }
+
+    return -1;
 }
 
 // ======================== หา il2cpp base ========================
